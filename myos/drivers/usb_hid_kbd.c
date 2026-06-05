@@ -301,11 +301,11 @@ static int hid_try_port(uint8_t port) {
 
     /* Port reset */
     MMIO_W32(portsc_addr, (portsc & 0x0FFFFE0Fu) | (1u << 4));
-    hid_delay(50000);   /* 50 ms — USB spec requires ≥ 10 ms reset pulse */
+    hid_delay(150000);   /* 150 ms — increased from 50ms for real hardware compatibility */
     for (int t = 0; t < 500; t++) {
         portsc = MMIO_R32(portsc_addr);
         if (!(portsc & (1u << 4))) break;
-        hid_delay(1000);
+        hid_delay(2000);   /* increased from 1000 */
     }
 
     /* Clear change bits (CSC, PRC, PLC, CEC) */
@@ -315,10 +315,10 @@ static int hid_try_port(uint8_t port) {
 
     /* PED (Port Enabled, bit 1) must be set after reset */
     int ped = 0;
-    for (int t = 0; t < 200; t++) {
+    for (int t = 0; t < 500; t++) {  /* increased from 200 */
         portsc = MMIO_R32(portsc_addr);
         if (portsc & 0x02u) { ped = 1; break; }
-        hid_delay(1000);
+        hid_delay(2000);   /* increased from 1000 */
     }
     if (!ped) return -1;
 
@@ -513,15 +513,35 @@ int usb_hid_kbd_init(void) {
          p <= (uint8_t)g_xhci_num_ports && p <= XHCI_MAX_PORTS; p++) {
         uint32_t psc = MMIO_R32(g_xhci_op_base + 0x400 + 0x10*(uint32_t)(p-1));
 
-        /* Build and print port status line */
-        char dbg[32];
+        /* Build and print port status line with more detail */
+        char dbg[64];
         const char *hx = "0123456789ABCDEF";
-        dbg[0]='P'; dbg[1]='o'; dbg[2]='r'; dbg[3]='t'; dbg[4]=' ';
-        dbg[5] = (p >= 10) ? ('0' + p/10) : ' ';
-        dbg[6] = '0' + p % 10;
-        dbg[7]=':'; dbg[8]=' '; dbg[9]='0'; dbg[10]='x';
-        for (int i = 0; i < 8; i++) dbg[11+i] = hx[(psc >> (28 - i*4)) & 0xF];
-        dbg[19] = '\0';
+        
+        uint8_t speed_code = (psc >> 10) & 0x0F;
+        const char *speed_str = "Unknown";
+        if (speed_code == 1) speed_str = "Full";
+        else if (speed_code == 2) speed_str = "Low";
+        else if (speed_code == 3) speed_str = "High";
+        else if (speed_code == 4) speed_str = "Super";
+        
+        int len = 0;
+        dbg[len++] = 'P'; dbg[len++] = 'o'; dbg[len++] = 'r'; dbg[len++] = 't';
+        dbg[len++] = ' ';
+        if (p >= 10) dbg[len++] = '0' + p/10;
+        dbg[len++] = '0' + p % 10;
+        dbg[len++] = ':';
+        dbg[len++] = ' ';
+        dbg[len++] = 'C'; dbg[len++] = 'C'; dbg[len++] = 'S';
+        dbg[len++] = '=';
+        dbg[len++] = (psc & 1) ? '1' : '0';
+        dbg[len++] = ' ';
+        dbg[len++] = 'S'; dbg[len++] = 'p'; dbg[len++] = 'e'; dbg[len++] = 'e';
+        dbg[len++] = 'd'; dbg[len++] = '=';
+        while (*speed_str) dbg[len++] = *speed_str++;
+        dbg[len++] = ' ';
+        dbg[len++] = '0'; dbg[len++] = 'x';
+        for (int i = 0; i < 8; i++) dbg[len++] = hx[(psc >> (28 - i*4)) & 0xF];
+        dbg[len] = '\0';
         terminal_writeline(dbg);
 
         if (!(psc & 0x01u)) continue;                       /* CCS=0, skip */
