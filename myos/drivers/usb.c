@@ -1,5 +1,5 @@
 /*
- * usb.c — xHCI USB 3.0 Mass Storage Driver
+ * usb.c — xHCI USB 3.0 Mass Storage Driver with Partition Table Debugging
  *
  * Handles:
  *   A. BIOS handoff (LEGSUP)
@@ -9,6 +9,7 @@
  *   E. CErr=3, cycle bit tracking, Link TRB
  *   F. Partition table: MBR and GPT, dynamic storage partition selection
  *   G. g_ctx_dwords exported for usb_hid_kbd.c
+ *   H. Partition table debugging output
  */
 
 #include "usb.h"
@@ -18,7 +19,7 @@
 extern void terminal_writeline(const char *s);
 extern void terminal_write(const char *s);
 
-/* ── Serial ──────────────────────────────────────────────────────────── */
+/* ── Serial ───────────────────────────────────────────────────────────── */
 static inline void outb(uint16_t p, uint8_t v)
     { __asm__ volatile("outb %0,%1" :: "a"(v), "Nd"(p)); }
 static inline uint8_t inb(uint16_t p)
@@ -64,17 +65,17 @@ static void serial_write_dec(uint32_t v) {
     serial_write(b + i + 1);
 }
 
-/* ── PCI ─────────────────────────────────────────────────────────────── */
+/* ── PCI ──────────────────────────────────────────────────────────────── */
 #define PCI_ADDR 0xCF8
 #define PCI_DATA 0xCFC
 static uint32_t pci_read(uint8_t b, uint8_t s, uint8_t f, uint8_t o) {
     outl(PCI_ADDR, 0x80000000u | ((uint32_t)b<<16) | ((uint32_t)s<<11)
-                               | ((uint32_t)f<<8)  | (o & 0xFC));
+                                | ((uint32_t)f<<8)  | (o & 0xFC));
     return inl(PCI_DATA);
 }
 static void pci_write(uint8_t b, uint8_t s, uint8_t f, uint8_t o, uint32_t v) {
     outl(PCI_ADDR, 0x80000000u | ((uint32_t)b<<16) | ((uint32_t)s<<11)
-                               | ((uint32_t)f<<8)  | (o & 0xFC));
+                                | ((uint32_t)f<<8)  | (o & 0xFC));
     outl(PCI_DATA, v);
 }
 #define mmio_r32(a)    (*(volatile uint32_t *)(uintptr_t)(a))
@@ -111,7 +112,7 @@ uint32_t g_evt_idx   = 0, g_evt_cycle  = 1;
 
 uint8_t g_xhci_occupied_ports[XHCI_MAX_PORTS] = {0};
 
-/* ── Private ─────────────────────────────────────────────────────────── */
+/* ── Private ──────────────────────────────────────────────────────────── */
 static xhci_trb_t *bulk_in_ring  = 0;
 static xhci_trb_t *bulk_out_ring = 0;
 static xhci_trb_t *ep0_ring      = 0;
@@ -136,7 +137,7 @@ static uint32_t g_part2_lba  = 0;
 static uint32_t g_part2_size = 0;
 static uint32_t g_tag        = 1;
 
-/* ── Helpers ─────────────────────────────────────────────────────────── */
+/* ── Helpers ──────────────────────────────────────────────────────────── */
 static void memclr(void *p, uint32_t n) {
     uint8_t *b = (uint8_t *)p;
     for (uint32_t i = 0; i < n; i++) b[i] = 0;
@@ -151,7 +152,7 @@ static void setup_transfer_ring(xhci_trb_t *ring, uint32_t cy) {
     ring[63].control  = (TRB_LINK << 10) | 0x02u | cy;
 }
 
-/* ── BIOS Handoff ────────────────────────────────────────────────────── */
+/* ── BIOS Handoff ─────────────────────────────────────────────────────── */
 static void xhci_bios_handoff(uint32_t bar0) {
     uint32_t hccparams1 = mmio_r32(bar0 + 0x10);
     uint32_t xecp = (hccparams1 >> 16) & 0xFFFF;
@@ -190,7 +191,7 @@ static void xhci_bios_handoff(uint32_t bar0) {
     if (!found) serial_write("No LEGSUP cap found\n");
 }
 
-/* ── xHCI events & commands ──────────────────────────────────────────── */
+/* ── xHCI events & commands ───────────────────────────────────────────── */
 void xhci_ring_doorbell(uint32_t slot, uint32_t target) {
     mmio_w32(g_xhci_db_base + slot * 4, target);
 }
@@ -226,7 +227,7 @@ int xhci_wait_event(uint32_t want_type, uint32_t timeout_ms) {
 }
 
 int xhci_send_cmd(uint32_t type, uint32_t p0, uint32_t p1,
-                  uint32_t st, uint32_t slot) {
+                   uint32_t st, uint32_t slot) {
     uint32_t idx = g_cmd_idx;
     g_cmd_ring[idx].param_lo = p0;
     g_cmd_ring[idx].param_hi = p1;
@@ -246,7 +247,7 @@ int xhci_send_cmd(uint32_t type, uint32_t p0, uint32_t p1,
     return xhci_wait_event(TRB_CMD_COMPLETION, 2000);
 }
 
-/* ── EP0 Control Transfer (shared, used by mass storage slot) ────────── */
+/* ── EP0 Control Transfer (shared, used by mass storage slot) ──────────── */
 static void ep0_enqueue(uint32_t p0, uint32_t p1, uint32_t st, uint32_t ctrl) {
     ctrl = (ctrl & ~1u) | (ep0_cycle & 1u);
     ep0_ring[ep0_idx].param_lo = p0;
@@ -289,7 +290,7 @@ int xhci_control_transfer(uint8_t bmRT, uint8_t bReq, uint16_t wVal,
     return 0;
 }
 
-/* ── Bulk Transfer ───────────────────────────────────────────────────── */
+/* ── Bulk Transfer ────────────────────────────────────────────────────── */
 static int xhci_bulk_transfer(void *data, uint32_t size,
                                int is_in, uint32_t timeout_ms) {
     xhci_trb_t *ring  = is_in ? bulk_in_ring   : bulk_out_ring;
@@ -310,7 +311,7 @@ static int xhci_bulk_transfer(void *data, uint32_t size,
     return xhci_wait_event(TRB_TRANSFER_EVT, timeout_ms);
 }
 
-/* ── BOT Mass Storage ────────────────────────────────────────────────── */
+/* ── BOT Mass Storage ─────────────────────────────────────────────────── */
 typedef struct {
     uint32_t sig, tag, dlen;
     uint8_t  flags, lun, cblen, cb[16];
@@ -346,7 +347,7 @@ static int bot_scsi(uint8_t op, uint32_t lba, uint8_t cnt,
     return (dma_csw.status == 0) ? 0 : -1;
 }
 
-/* ── Partition table parsing ─────────────────────────────────────────── */
+/* ── Partition table parsing ──────────────────────────────────────────── */
 /*
  * MBR partition entry at byte offset 0x1BE + n*16:
  *   +0  status (0x80 = bootable)
@@ -395,6 +396,30 @@ static int guid_is_zero(const uint8_t *g) {
 
 static uint8_t gpt_sector[512] __attribute__((aligned(64)));
 
+/* Debug partition table information */
+static void debug_partition_info(uint8_t *mbr) {
+    serial_write("=== MBR Partition Debug ===\n");
+    for (int n = 0; n < 4; n++) {
+        uint8_t *pe = &mbr[0x1BE + n * 16];
+        uint8_t status = pe[0];
+        uint8_t type = pe[4];
+        uint32_t lba = *(uint32_t *)(pe + 8);
+        uint32_t size = *(uint32_t *)(pe + 12);
+        
+        serial_write("Partition ");
+        serial_write_dec(n + 1);
+        serial_write(": Status=");
+        serial_write_hex(status);
+        serial_write(" Type=");
+        serial_write_hex(type);
+        serial_write(" LBA=");
+        serial_write_dec(lba);
+        serial_write(" Size=");
+        serial_write_dec(size);
+        serial_write("\n");
+    }
+}
+
 /*
  * usb_parse_partition_table
  *
@@ -429,6 +454,9 @@ static void usb_parse_partition_table(void) {
         terminal_writeline("USB: No MBR signature — no storage partition.");
         return;
     }
+
+    /* Print debug info for all partitions */
+    debug_partition_info(dma_mbr);
 
     /* Check for GPT protective MBR: first partition type == 0xEE */
     uint8_t first_type = dma_mbr[0x1BE + 4];
@@ -727,7 +755,7 @@ int usb_init(void) {
 
         /* Port scan */
         terminal_writeline("USB: Port scan...");
-        io_delay(200000);
+        io_delay(500000);  /* Increased from 200000 to 500ms for better port settling */
         int connected_port = -1;
         for (uint32_t p = 0; p < g_xhci_num_ports; p++) {
             uint32_t pr = g_xhci_op_base + 0x400 + p * 0x10;
