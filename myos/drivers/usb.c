@@ -1,5 +1,5 @@
 /*
- * usb.c — xHCI USB 3.0 Mass Storage Driver with Partition Table Debugging
+ * usb.c — xHCI USB 3.0 Mass Storage Driver with Retry Logic
  *
  * Handles:
  *   A. BIOS handoff (LEGSUP)
@@ -9,7 +9,7 @@
  *   E. CErr=3, cycle bit tracking, Link TRB
  *   F. Partition table: MBR and GPT, dynamic storage partition selection
  *   G. g_ctx_dwords exported for usb_hid_kbd.c
- *   H. Partition table debugging output
+ *   H. Partition table debugging output with RETRY logic
  */
 
 #include "usb.h"
@@ -81,7 +81,7 @@ static void pci_write(uint8_t b, uint8_t s, uint8_t f, uint8_t o, uint32_t v) {
 #define mmio_r32(a)    (*(volatile uint32_t *)(uintptr_t)(a))
 #define mmio_w32(a, v) (*(volatile uint32_t *)(uintptr_t)(a) = (v))
 
-/* ── TRB type constants ──────────────────────────────────────────────── */
+/* ── TRB type constants ─��────────────────────────────────────────────── */
 #define TRB_SETUP          2
 #define TRB_DATA           3
 #define TRB_STATUS         4
@@ -112,7 +112,7 @@ uint32_t g_evt_idx   = 0, g_evt_cycle  = 1;
 
 uint8_t g_xhci_occupied_ports[XHCI_MAX_PORTS] = {0};
 
-/* ── Private ──────────────────────────────────────────────────────────── */
+/* ── Private ───────────────────────────────────────────────���──────────── */
 static xhci_trb_t *bulk_in_ring  = 0;
 static xhci_trb_t *bulk_out_ring = 0;
 static xhci_trb_t *ep0_ring      = 0;
@@ -290,7 +290,7 @@ int xhci_control_transfer(uint8_t bmRT, uint8_t bReq, uint16_t wVal,
     return 0;
 }
 
-/* ── Bulk Transfer ────────────────────────────────────────────────────── */
+/* ── Bulk Transfer ────────────────────────────────────────────���───────── */
 static int xhci_bulk_transfer(void *data, uint32_t size,
                                int is_in, uint32_t timeout_ms) {
     xhci_trb_t *ring  = is_in ? bulk_in_ring   : bulk_out_ring;
@@ -421,7 +421,7 @@ static void debug_partition_info(uint8_t *mbr) {
 }
 
 /*
- * usb_parse_partition_table
+ * usb_parse_partition_table with RETRY logic
  *
  * Reads LBA 0 (MBR) and determines whether the drive uses MBR or GPT.
  * For MBR: scans all four primary entries, skips the boot partition
@@ -433,6 +433,7 @@ static void debug_partition_info(uint8_t *mbr) {
  *          Basic Data partition that contains the bootloader files,
  *          selects the first remaining data partition.
  *
+ * RETRY: If MBR read fails, retries 3 times with 500ms delay.
  * Sets g_part2_lba and g_part2_size on success.
  * On failure leaves both at 0 — fat16 will format a fresh filesystem
  * at LBA offset 0 (which will fail gracefully if the disk is read-only).
@@ -445,11 +446,32 @@ static void usb_parse_partition_table(void) {
     terminal_writeline("USB: Reading partition table...");
     io_delay(300000);
 
-    /* Read MBR (LBA 0) */
-    if (bot_scsi(0x28, 0, 1, dma_mbr, 1, 1500) != 0) {
-        terminal_writeline("USB: MBR read failed — no storage partition.");
+    /* Read MBR (LBA 0) with RETRY logic */
+    int mbr_success = 0;
+    for (int retry = 0; retry < 3; retry++) {
+        serial_write("MBR read attempt ");
+        serial_write_dec(retry + 1);
+        serial_write("/3\n");
+        
+        if (bot_scsi(0x28, 0, 1, dma_mbr, 1, 3000) == 0) {
+            serial_write("MBR read SUCCESS on attempt ");
+            serial_write_dec(retry + 1);
+            serial_write("\n");
+            mbr_success = 1;
+            break;
+        }
+        
+        if (retry < 2) {
+            serial_write("MBR read failed, retrying after 500ms...\n");
+            io_delay(500000);
+        }
+    }
+
+    if (!mbr_success) {
+        terminal_writeline("USB: MBR read failed after 3 attempts — no storage partition.");
         return;
     }
+
     if (dma_mbr[510] != 0x55 || dma_mbr[511] != 0xAA) {
         terminal_writeline("USB: No MBR signature — no storage partition.");
         return;
@@ -463,7 +485,7 @@ static void usb_parse_partition_table(void) {
     if (first_type == 0xEE) {
         /* GPT disk — read LBA 1 for GPT header */
         serial_write("GPT disk detected\n");
-        if (bot_scsi(0x28, 1, 1, gpt_sector, 1, 1500) != 0) {
+        if (bot_scsi(0x28, 1, 1, gpt_sector, 1, 3000) != 0) {
             terminal_writeline("USB: GPT header read failed.");
             return;
         }
@@ -501,7 +523,7 @@ static void usb_parse_partition_table(void) {
 
         /* First pass: find the end of the boot/EFI partitions */
         for (uint32_t s = 0; s < sector_count && s < 8; s++) {
-            if (bot_scsi(0x28, entry_lba + s, 1, gpt_sector, 1, 1500) != 0) break;
+            if (bot_scsi(0x28, entry_lba + s, 1, gpt_sector, 1, 3000) != 0) break;
             for (uint32_t e = 0; e < entries_per_sector; e++) {
                 uint32_t off = e * entry_size;
                 if (off + entry_size > 512) break;
@@ -520,7 +542,7 @@ static void usb_parse_partition_table(void) {
 
         /* Second pass: find first data partition that starts after boot area */
         for (uint32_t s = 0; s < sector_count && s < 8; s++) {
-            if (bot_scsi(0x28, entry_lba + s, 1, gpt_sector, 1, 1500) != 0) break;
+            if (bot_scsi(0x28, entry_lba + s, 1, gpt_sector, 1, 3000) != 0) break;
             for (uint32_t e = 0; e < entries_per_sector; e++) {
                 uint32_t off = e * entry_size;
                 if (off + entry_size > 512) break;
