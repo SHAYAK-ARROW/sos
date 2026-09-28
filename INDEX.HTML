@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live GPS with Route</title>
+    
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <!-- Leaflet Routing Machine CSS (রাস্তা আঁকার জন্য) -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@latest/dist/leaflet-routing-machine.css" />
+    
+    <style>
+        body { font-family: sans-serif; margin: 0; padding: 0; background: #f8f9fa; }
+        .header { background: #0d6efd; color: white; padding: 15px; text-align: center; }
+        #map { width: 100%; height: 75vh; } 
+        .status { padding: 15px; background: #343a40; color: #ffc107; text-align: center; font-weight: bold; }
+        
+        /* ম্যাপের ডানদিকের টেক্সট ডিরেকশন বক্সটি লুকানোর জন্য */
+        .leaflet-routing-container { display: none !important; }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <h3 style="margin: 0;">🚲 Live Delivery Route</h3>
+    </div>
+    
+    <div id="map"></div>
+    
+    <div class="status" id="status-text">🟡 Waiting for GPS signal...</div>
+
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <!-- Leaflet Routing Machine JS (রাস্তা আঁকার জন্য) -->
+    <script src="https://unpkg.com/leaflet-routing-machine@latest/dist/leaflet-routing-machine.js"></script>
+    
+    <script>
+        const statusText = document.getElementById('status-text');
+        
+        // গন্তব্যের লোকেশন (যেমন: Park Street, Kolkata)
+        const destinationLat = 22.5552;
+        const destinationLng = 88.3524;
+
+        const map = L.map('map').setView([22.5726, 88.3639], 13); 
+        
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap'
+        }).addTo(map);
+
+        let routingControl = null;
+
+        if (navigator.geolocation) {
+            navigator.geolocation.watchPosition(
+                function(position) {
+                    const lat = position.coords.latitude;
+                    const lng = position.coords.longitude;
+                    
+                    statusText.innerHTML = "🟢 Tracking Live Route";
+                    statusText.style.color = "#28a745";
+                    
+                    // যদি আগে থেকে রাস্তা না আঁকা থাকে, তবে নতুন করে আঁকবে
+                    if (!routingControl) {
+                        routingControl = L.Routing.control({
+                            waypoints: [
+                                L.latLng(lat, lng), // শুরুর জায়গা (আপনার লাইভ লোকেশন)
+                                L.latLng(destinationLat, destinationLng) // গন্তব্য
+                            ],
+                            routeWhileDragging: false,
+                            addWaypoints: false, // ইউজারকে নতুন পিন বসাতে বাধা দেবে
+                            show: false,
+                            lineOptions: {
+                                styles: [{color: '#0d6efd', opacity: 0.9, weight: 6}] // নীল রঙের রাস্তা
+                            }
+                        }).addTo(map);
+                    } else {
+                        // আপনি মুভ করলে শুধু শুরুর পয়েন্টটা আপডেট হবে, রাস্তা নিজে থেকেই রি-ড্র হবে
+                        routingControl.spliceWaypoints(0, 1, L.latLng(lat, lng));
+                    }
+                },
+                function(error) {
+                    statusText.innerHTML = "🔴 GPS Blocked: " + error.message;
+                    statusText.style.color = "#dc3545";
+                },
+                { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 }
+            );
+        } else {
+            statusText.innerHTML = "❌ GPS not supported.";
+        }
+    </script>
+
+</body>
+</html>
